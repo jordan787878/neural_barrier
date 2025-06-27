@@ -212,12 +212,12 @@ def visual_barrier(const, net):
         X, Y, V,
         levels=levels,
         colors=['white','green','blue', 'yellow','red'],  # pick distinct colors
-        linewidths=2
+        linewidths=1.5,
     )
     ax.clabel(cs, fmt='%1.1f', fontsize=10)
 
     # 3) overlay your rectangles in 2D
-    visual_specification(ax, const.X_INIT_RANGE,   color='black')
+    visual_specification(ax, const.X_INIT_RANGE,   color='blue')
     visual_specification(ax, const.X_UNSAFE_RANGE, color='red')
     visual_specification(ax, const.X_GOAL_RANGE,   color='green')
 
@@ -268,7 +268,7 @@ def visual_specification(ax, bound, color, z_value=0.0):
         [x0, y0],
     ], dtype=np.float32)
     # plot in 3D: xs, ys, and constant z0
-    ax.plot(rect[:,0], rect[:,1], z0, color=color, linewidth=2)
+    ax.plot(rect[:,0], rect[:,1], z0, color=color, linewidth=1.5, linestyle="--")
 
 
 def check_barrier(const, net):
