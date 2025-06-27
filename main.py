@@ -3,6 +3,7 @@ import numpy as np
 from src.constants import Const_GBM
 from src.models import BaseNet, load_trained_model
 import matplotlib.pyplot as plt
+from test_all import test_dynamics
 const = Const_GBM()
 
 
@@ -201,13 +202,13 @@ def visual_barrier(const, net):
     # 1) filled background contour for V
     cf = ax.contourf(
         X, Y, V,
-        levels=50,                  # many intermediate levels
+        levels=10,                  # many intermediate levels
         cmap='viridis',
         alpha=0.6
     )
     cbar = fig.colorbar(cf, ax=ax, label=r'$V(x)$')
     # 2) explicit contour lines at 0.9, 1.0, and 40.0
-    levels = [0.1, 0.9, 1.0, 10.0, 40.0]
+    levels = [0.1, 0.9, 1.0, 2.0, 10.0]
     cs = ax.contour(
         X, Y, V,
         levels=levels,
@@ -220,6 +221,11 @@ def visual_barrier(const, net):
     visual_specification(ax, const.X_INIT_RANGE,   color='blue')
     visual_specification(ax, const.X_UNSAFE_RANGE, color='red')
     visual_specification(ax, const.X_GOAL_RANGE,   color='green')
+
+    # 4) overlay sample trajs
+    x1_traj, x2_traj = test_dynamics()
+    for i in range(x1_traj.shape[0]):
+        plt.plot(x1_traj[i,:], x2_traj[i,:], color="white", linewidth=0.5)
 
     ax.set_xlabel(r'$x_1$')
     ax.set_ylabel(r'$x_2$')
@@ -247,6 +253,7 @@ def visual_barrier_3d(const, net):
     visual_specification(ax, const.X_INIT_RANGE, "black")
     visual_specification(ax, const.X_UNSAFE_RANGE, "red")
     visual_specification(ax, const.X_GOAL_RANGE, "green")
+    # ax.set_zlim(0.0, 3.0)
     plt.xlabel(r'$x_1$')
     plt.ylabel(r'$x_2$')
     plt.show()

@@ -13,11 +13,10 @@ def test_dynamics(show_plot=False):
     batch_size = 3
     x = np.random.uniform(low, high, size=(batch_size, low.shape[0])).astype(np.float32)
 
-    sim_time = 15.0
+    sim_time = 10.0
     dt = 1e-3
-    if(show_plot):
-        x1_data = x[:,0].reshape(-1,1)
-        x2_data = x[:,1].reshape(-1,1)
+    x1_data = x[:,0].reshape(-1,1)
+    x2_data = x[:,1].reshape(-1,1)
     for k in range(int(sim_time/dt)):
         # standard brownian noise
         dw = np.random.randn(batch_size, const.X_DIM).astype(np.float32)
@@ -26,9 +25,8 @@ def test_dynamics(show_plot=False):
         dx = dynamics.dyn_f(x)*dt + np.matmul(dynamics.dyn_g(x), dw[..., None])[..., 0]
         # update state
         x = x + dx
-        if(show_plot):
-            x1_data = np.concatenate([x1_data, x[:,0].reshape(-1,1)], axis=1)
-            x2_data = np.concatenate([x2_data, x[:,1].reshape(-1,1)], axis=1)
+        x1_data = np.concatenate([x1_data, x[:,0].reshape(-1,1)], axis=1)
+        x2_data = np.concatenate([x2_data, x[:,1].reshape(-1,1)], axis=1)
     np.testing.assert_allclose(x, 0.0, rtol=1e-3, atol=1e-4, 
                                err_msg="test_dynamics does not approach zeros")
     if(show_plot):
@@ -37,6 +35,7 @@ def test_dynamics(show_plot=False):
         plt.xlim(const.X_RANGE[0,:])
         plt.ylim(const.X_RANGE[1,:])
         plt.show()
+    return x1_data, x2_data
 
 
 def main():
