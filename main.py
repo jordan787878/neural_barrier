@@ -275,11 +275,15 @@ def check_barrier(const, net):
     batch_size = 100000
     x = const.sample_x(const.X_RANGE, batch_size)
     V = net(x).detach().numpy()
-    print("[check init] V(x) >= 0 for all x, Vmin={:.4f}".format(V.min()))
+    print("[check non-negative] V(x) >= 0 for all x, Vmin={:.4f}".format(V.min()))
+
+    x = const.sample_x(const.X_INIT_RANGE, batch_size)
+    V = net(x).detach().numpy()
+    print("[check init] V(x) <= 1.0 for all x, Vmax={:.4f}".format(V.max()))
 
     x = const.sample_x(const.X_UNSAFE_RANGE, batch_size)
     V = net(x).detach().numpy()
-    print("[check unsafe] V(x) >= 1.0 for all x in X_unsafe, Vmin={:.4f}".format(V.min()))
+    print("[check unsafe] V(x) >= 10.0 for all x in X_unsafe, Vmin={:.4f}".format(V.min()))
 
     x = const.sample_x(const.X_GOAL_RANGE, batch_size)
     V = net(x).detach().numpy()
