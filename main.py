@@ -126,9 +126,9 @@ def train_barrier(const, net, iterations=20000):
             V = net(x)
             V_min = V.min()
             vio_dict["V(x_goal) min"] = V_min.item()
-            # hinge‐loss to keep 0 ≤ V_min ≤ 0.9
-            loss_lower = torch.relu(0.0   - V_min)   # penalizes V_min < 0
-            loss_upper = torch.relu(V_min - 0.9)     # penalizes V_min > 0.9
+            # hinge‐loss to keep 0 ≤ V_min ≤ const.BETA_S
+            loss_lower = torch.relu(0.0 - V).mean()   # penalizes V_min < 0
+            loss_upper = torch.relu(V - const.BETA_S).mean()     # penalizes V_min > const.BETA_S
             loss_goal = loss_lower + loss_upper
             loss = loss + loss_goal
 
@@ -151,8 +151,6 @@ def train_barrier(const, net, iterations=20000):
         vio_dict["GV max"] = GV.max()
         loss_differential = torch.relu(GV + const.ZETA).mean()
         loss = loss + loss_differential
-        # if(violate_percent > 0.0):
-        #     loss = loss + torch.mean(GV + const.ZETA)**2
 
         # --- loss Nonegative
         # x = const.sample_x(const.X_RANGE, batch_size)
@@ -175,9 +173,24 @@ def train_barrier(const, net, iterations=20000):
                     print(f".  {k}: None")
                 else:
                     print(f".  {k}: {v:.4f}")
-        if(loss.item() <= 0.0):
+        # if(loss.item() <= 0.0):
+        if(vio_dict["init"] <= 0
+           and vio_dict["unsafe"] <=0 
+           and vio_dict["goal"] <= 0
+           and vio_dict["V(x_goal) min"] <= const.BETA_S
+           and vio_dict["GV max"] < 0.0
+           ):
             print("[Training Complete] no violation found")
-            return net
+            best["best_iter"] = iter
+            best["best_loss"] = loss.item()
+            best["best_model"] = net
+            print("[Best] iter {:3d}, loss: {:.4f}".format(iter, loss.item()))
+            for k, v in vio_dict.items():
+                if v is None:
+                    print(f".  {k}: None")
+                else:
+                    print(f".  {k}: {v:.4f}")
+            return best["best_model"]
         loss.backward(retain_graph=True)
         optimizer.step()
         scheduler.step()
@@ -286,7 +299,7 @@ def check_barrier(const, net):
 
     x = const.sample_x(const.X_INIT_RANGE, batch_size)
     V = net(x).detach().numpy()
-    print("[check init] V(x) <= 1.0 for all x, Vmax={:.4f}".format(V.max()))
+    print("[check init] V(x) <= 1.0 for all x in X_init, Vmax={:.4f}".format(V.max()))
 
     x = const.sample_x(const.X_UNSAFE_RANGE, batch_size)
     V = net(x).detach().numpy()
@@ -316,7 +329,7 @@ def check_barrier(const, net):
 
 def main():
     train_flag = False
-    net_path = "output/net.pth"
+    net_path = "output/net_v1.pth"
 
     net = BaseNet(const, neurons=128)
     if(train_flag):
