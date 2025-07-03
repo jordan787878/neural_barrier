@@ -4,6 +4,9 @@ from src.constants import Const_GBM
 from src.models import BaseNet, load_trained_model
 import matplotlib.pyplot as plt
 from test_all import test_dynamics
+from scipy.stats import beta
+from scipy.special import betaincinv
+
 const = Const_GBM()
 
 
@@ -243,8 +246,9 @@ def visual_barrier(const, net):
     ax.set_xlabel(r'$x_1$')
     ax.set_ylabel(r'$x_2$')
     ax.set_aspect('equal', 'box')
-    plt.tight_layout()
-    plt.show()
+    plt.tight_layout(pad=0.3)
+    fig.savefig("figs/Vfunc_v1.pdf", format='pdf')
+    # plt.show()
 
 
 def visual_barrier_3d(const, net):
@@ -269,7 +273,8 @@ def visual_barrier_3d(const, net):
     # ax.set_zlim(0.0, 3.0)
     plt.xlabel(r'$x_1$')
     plt.ylabel(r'$x_2$')
-    plt.show()
+    plt.tight_layout(pad=0.3)
+    fig.savefig("figs/Vfunc_3d_v1.pdf", format='pdf')
 
 
 def visual_specification(ax, bound, color, z_value=0.0):
@@ -292,39 +297,63 @@ def visual_specification(ax, bound, color, z_value=0.0):
 
 
 def check_barrier(const, net):
+    print("The training with soft constraint uses: alpha_RA={:.2f} , beta_RA={:.2f}, beta_S={:.2f}".format(
+        const.ALPHA_RA, const.BETA_RA, const.BETA_S
+    ))
+    print(", which yields probabiliaty of reach avoid: {:.6f}".format(1-const.ALPHA_RA/const.BETA_RA))
+
+    d = 2
     batch_size = 100000
-    x = const.sample_x(const.X_RANGE, batch_size)
-    V = net(x).detach().numpy()
-    print("[check non-negative] V(x) >= 0 for all x, Vmin={:.4f}".format(V.min()))
+    delta = 1e-9
+    eps = betaincinv(d, batch_size - d + 1, 1 - delta)
+    print("# ---- Doing scenario-based verification with {:3d} samples --- # ".format(batch_size))
 
-    x = const.sample_x(const.X_INIT_RANGE, batch_size)
-    V = net(x).detach().numpy()
-    print("[check init] V(x) <= 1.0 for all x in X_init, Vmax={:.4f}".format(V.max()))
+    x_full = const.sample_x(const.X_RANGE, batch_size, requires_grad=True)
+    V = net(x_full).detach().numpy()
+    print("[check non-negative] V >= 0 for all x samples. ### Vmin={:.4f}".format(V.min()))
 
-    x = const.sample_x(const.X_UNSAFE_RANGE, batch_size)
-    V = net(x).detach().numpy()
-    print("[check unsafe] V(x) >= 10.0 for all x in X_unsafe, Vmin={:.4f}".format(V.min()))
+    # --- alpha ---
+    inside_init = filter_sample_insidebound(x_full, const.X_INIT_RANGE)
+    if inside_init.any():
+        x_init = x_full[inside_init]
+    V_init = net(x_init).detach().numpy()
+    alpha_RA_stat = V_init.max()
+    print("[find] Vmin for all x samples in INIT. ### Vmin = {:.4f}".format(alpha_RA_stat))
 
-    x = const.sample_x(const.X_GOAL_RANGE, batch_size)
-    V = net(x).detach().numpy()
-    print("[check goal] (1) exists V(x) <= 0.9, x in X_goal, Vmin={:.4f}".format(V.min()))
-    x = const.sample_x(const.X_RANGE, batch_size)
-    inside_goal = filter_sample_insidebound(x, const.X_GOAL_RANGE)
-    outside_goal = ~inside_goal
-    x = x[outside_goal]
-    V = net(x).detach().numpy()
-    print("[check goal] (2) V(x) >= 0.9 for all x outside X_goal, Vmin={:.4f}".format(V.min()))
+    # --- check feasibility ---
+    inside_unsafe = filter_sample_insidebound(x_full, const.X_UNSAFE_RANGE)
+    if inside_unsafe.any():
+        x_unsafe = x_full[inside_unsafe]
+    V_unsafe = net(x_unsafe).detach().numpy()
+    print("[check beta_RA] beta_RA {:.4f} <= V for all x samples in UNSAFE. ### min V: {:.4f}".format(const.BETA_RA, V_unsafe.min()))
 
-    x = const.sample_x(const.X_RANGE, batch_size, requires_grad=True)
-    inside_goal = filter_sample_insidebound(x, const.X_GOAL_RANGE)
+    # --- check goal
+    inside_goal = filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
     if inside_goal.any():
-        x = x[~inside_goal]
-    V = net(x)
-    mask = (V.view(-1) <= const.BETA_RA)
+        x_inside_goal = x_full[inside_goal]
+    V_goal_in = net(x_inside_goal).detach().numpy()
+    print("[check goal] (1) exists V(x) <= 0.9, for all x samples in GOAL. ### Vmin={:.4f}".format(V_goal_in.min()))
+    # x = const.sample_x(const.X_RANGE, batch_size)
+    # inside_goal = filter_sample_insidebound(x, const.X_GOAL_RANGE)
+    outside_goal = ~inside_goal
+    if outside_goal.any():
+        x_outside_goal = x_full[outside_goal]
+    V_goal_out = net(x_outside_goal).detach().numpy()
+    print("[check goal] (2) V(x) >= 0.9 for all x samples in GOAL. ### Vmin={:.4f}".format(V_goal_out.max()))
+
+    if inside_goal.any():
+        x_G= x_full[~inside_goal]
+    V_G = net(x_G)
+    mask = (V_G.view(-1) <= const.BETA_RA)
     if(mask.any()):
-        x = x[mask]
-    GV = diff_operator(const, net, x).detach().numpy()
-    print("[check differentail] V(x) < 0 for all x in the sub-beta_RA set and outside the target, GVmax={:.4f}".format(GV.max()))
+        x_G = x_G[mask]
+    GV = diff_operator(const, net, x_G).detach().numpy()
+    print("[check differentail] V(x) < 0 for all x in the sub-beta_RA set and outside the target. ### GVmax={:.4f}".format(GV.max()))
+
+    Prob_RA = 1 - alpha_RA_stat/const.BETA_RA
+    print("After verification, we have: with confidence {:.5f}, the probability of [reach avoid >= {:.6f}] is greater than {:.5f}".format(
+        1 - delta, Prob_RA, 1 - eps
+    ))
 
 
 def main():
@@ -338,12 +367,13 @@ def main():
         net.apply(init_weights_xavier)
         # visual_barrier(const, net)
         net = train_barrier(const, net, iterations=50000)
-        torch.save({
-                    'model_state_dict': net.state_dict(),
-                    # 'epoch': epoch, 
-                    # 'loss_history': loss_history, 
-                    # 'train_time': train_time,
-                    }, net_path)
+        if(net_path is not None):
+            torch.save({
+                        'model_state_dict': net.state_dict(),
+                        # 'epoch': epoch, 
+                        # 'loss_history': loss_history, 
+                        # 'train_time': train_time,
+                        }, net_path)
     else:
         net = load_trained_model(net, net_path)
 
