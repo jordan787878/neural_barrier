@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 from src.constants import Const_GBM
-from src.models import BaseNet, load_trained_model
+from src.models import BaseNet, IBPNet, load_trained_model
+from src.dynamics import propagate_traj
+from src.verify_ibp import verify_ibp_differential
 import matplotlib.pyplot as plt
-from test_all import test_dynamics
-from scipy.stats import beta
 from scipy.special import betaincinv
 
 const = Const_GBM()
@@ -54,15 +54,15 @@ def train_barrier(const, net, iterations=20000):
     # --- deterministic grid ---
     _, _, grid_points_tensor = const.generate_grid(N=100)
 
-    inside_init = filter_sample_insidebound(grid_points_tensor, const.X_INIT_RANGE)
+    inside_init = const.filter_sample_insidebound(grid_points_tensor, const.X_INIT_RANGE)
     if inside_init.any():
         grid_points_init = grid_points_tensor[inside_init]
 
-    inside_unsafe = filter_sample_insidebound(grid_points_tensor, const.X_UNSAFE_RANGE)
+    inside_unsafe = const.filter_sample_insidebound(grid_points_tensor, const.X_UNSAFE_RANGE)
     if inside_unsafe.any():
         grid_points_unsafe = grid_points_tensor[inside_unsafe]
 
-    inside_goal = filter_sample_insidebound(grid_points_tensor, const.X_GOAL_RANGE)
+    inside_goal = const.filter_sample_insidebound(grid_points_tensor, const.X_GOAL_RANGE)
     if inside_goal.any():
         grid_points_goal = grid_points_tensor[inside_goal]             
 
@@ -114,7 +114,7 @@ def train_barrier(const, net, iterations=20000):
         # 1) sample a batch from the full domain
         x_full = const.sample_x(const.X_RANGE, batch_size)
         x_full = torch.cat((x_full, grid_points_tensor), dim=0)
-        inside_goal = filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
+        inside_goal = const.filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
         outside_goal = ~inside_goal
         if outside_goal.any():
             x = x_full[outside_goal]
@@ -138,7 +138,7 @@ def train_barrier(const, net, iterations=20000):
         # --- loss Differential ---
         x = const.sample_x(const.X_RANGE, batch_size, requires_grad=True)
         x = torch.cat((x, grid_points_tensor), dim=0)
-        inside_goal = filter_sample_insidebound(x, const.X_GOAL_RANGE)
+        inside_goal = const.filter_sample_insidebound(x, const.X_GOAL_RANGE)
         if inside_goal.any():
             x = x[~inside_goal]
         V = net(x)
@@ -200,12 +200,154 @@ def train_barrier(const, net, iterations=20000):
     return best["best_model"]
 
 
-def filter_sample_insidebound(x, bound):
-    bound   = torch.as_tensor(bound, dtype=x.dtype)
-    lows, highs = bound[:,0], bound[:,1]                        # each (2,)
-    inside = (x >= lows) & (x <= highs)                  # shape (M,2) bool
-    inside = inside.all(dim=1)                       # shape (M,)  bool
-    return inside
+def train_barrier_ibp(const, net, iterations=20000):
+    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.95)
+    batch_size = 500
+
+    # --- deterministic grid ---
+    _, _, grid_points_tensor = const.generate_grid(N=100)
+
+    inside_init = const.filter_sample_insidebound(grid_points_tensor, const.X_INIT_RANGE)
+    if inside_init.any():
+        grid_points_init = grid_points_tensor[inside_init]
+
+    inside_unsafe = const.filter_sample_insidebound(grid_points_tensor, const.X_UNSAFE_RANGE)
+    if inside_unsafe.any():
+        grid_points_unsafe = grid_points_tensor[inside_unsafe]
+
+    inside_goal = const.filter_sample_insidebound(grid_points_tensor, const.X_GOAL_RANGE)
+    if inside_goal.any():
+        grid_points_goal = grid_points_tensor[inside_goal]             
+
+    # --- training ---
+    best = {"best_iter":None, "best_model": None, "best_loss": np.inf}
+    for iter in range(iterations):
+        loss = torch.tensor(0.0)
+        optimizer.zero_grad()
+        vio_dict = {"init": None,
+                    "goal": None,
+                    "unsafe": None,
+                    "differential": None}
+
+        # --- loss init ---
+        x = const.sample_x(const.X_INIT_RANGE, batch_size)
+        x = torch.cat((x, grid_points_init), dim=0)
+        V = net(x)
+        violate = (const.ALPHA_RA < V)
+        violate_percent = 100.0*(violate.sum()/V.shape[0])
+        vio_dict["init"] = violate_percent.item()
+        loss_init = torch.mean(torch.relu(V - const.ALPHA_RA))
+        loss = loss + loss_init
+
+        # --- loss unsafe ---
+        x = const.sample_x(const.X_UNSAFE_RANGE, batch_size)
+        x = torch.cat((x, grid_points_unsafe), dim=0)
+        V = net(x)
+        violate = (V < const.BETA_RA)
+        violate_percent = 100.0*(violate.sum()/V.shape[0])
+        vio_dict["unsafe"] = violate_percent.item()
+        loss_unsafe =  torch.mean(torch.relu(const.BETA_RA - V))
+        loss = loss + loss_unsafe
+
+        # --- loss goal ---
+        """
+        change the loss_goal via:
+        the set Phi = {x such that V(x) <= 0.9} is 
+        (1) Phi is non-empty and
+        (2) Phi is a proper subset inside const.X_GOAL_RANGE
+        """
+        # 1) sample a batch from the full domain
+        x_full = const.sample_x(const.X_RANGE, batch_size)
+        x_full = torch.cat((x_full, grid_points_tensor), dim=0)
+        inside_goal = const.filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
+        outside_goal = ~inside_goal
+        if outside_goal.any():
+            x = x_full[outside_goal]
+            V = net(x)
+            violate = (V <= const.BETA_S)
+            violate_percent = 100.0*(violate.sum()/V.shape[0])
+            vio_dict["goal"] = violate_percent.item()
+            loss_goal = torch.mean(torch.relu(const.BETA_S - V))
+            loss = loss + loss_goal
+        x = const.sample_x(const.X_GOAL_RANGE, batch_size)
+        x = torch.cat((x, grid_points_goal), dim=0)
+        V = net(x)
+        V_min = V.min()
+        vio_dict["[info] V(x_goal) min"] = V_min.item()
+        # hinge‐loss to keep 0 ≤ V_min ≤ const.BETA_S
+        loss_lower = torch.mean(torch.relu(0.0 - V))   # penalizes V_min < 0
+        loss_upper = torch.mean(torch.relu(V - const.BETA_S))    # penalizes V_min > const.BETA_S
+        loss_goal = loss_lower + loss_upper
+        loss = loss + loss_goal
+
+        # --- loss Differential ---
+        x = const.sample_x(const.X_RANGE, batch_size, requires_grad=True)
+        x = torch.cat((x, grid_points_tensor), dim=0)
+        inside_goal = const.filter_sample_insidebound(x, const.X_GOAL_RANGE)
+        if inside_goal.any():
+            x = x[~inside_goal]
+        V = net(x)
+        mask = (V.view(-1) <= const.BETA_RA)
+        if(mask.any()):
+            x = x[mask]
+        else:
+            raise("cannot find samples for differential constraint")
+        GV = diff_operator(const, net, x)
+        violate = (-const.ZETA < GV)
+        violate_percent = 100.0*(violate.sum()/GV.shape[0])
+        vio_dict["differential"] = violate_percent.item()
+        vio_dict["[info] GV max"] = GV.max()
+        loss_differential = torch.mean(torch.relu(GV + const.ZETA))
+        loss = loss + loss_differential
+
+        # --- loss Nonegative
+        # x = const.sample_x(const.X_RANGE, batch_size)
+        # x = torch.cat((x, grid_points_tensor), dim=0)
+        # V = net(x)
+        # violate = (V < 0.0)
+        # violate_percent = 100.0*(violate.sum()/V.shape[0])
+        # vio_dict["non-neg"] = violate_percent.item()
+        # loss_nonneg = torch.relu(0.0 - V).mean()
+        # loss = loss + loss_nonneg
+        
+        # --- optimize ---
+        if(loss.item() < 0.95*best["best_loss"]):
+            best["best_iter"] = iter
+            best["best_loss"] = loss.item()
+            best["best_model"] = net
+            print("[Best] iter {:3d}, loss: {:.4f}".format(iter, loss.item()))
+            for k, v in vio_dict.items():
+                if v is None:
+                    print(f".  {k}: None")
+                else:
+                    print(f".  {k}: {v:.4f}")
+        # if(loss.item() <= 0.0):
+        if(vio_dict["init"] <= 0
+           and vio_dict["unsafe"] <=0 
+           and vio_dict["goal"] <= 0
+           and vio_dict["[info] V(x_goal) min"] <= const.BETA_S
+           and vio_dict["[info] V(x_goal) min"] >= 0.0
+           and vio_dict["GV max"] < 0.0
+           ):
+            print("[Training Complete] no violation found")
+            best["best_iter"] = iter
+            best["best_loss"] = loss.item()
+            best["best_model"] = net
+            print("[Best] iter {:3d}, loss: {:.4f}".format(iter, loss.item()))
+            for k, v in vio_dict.items():
+                if v is None:
+                    print(f".  {k}: None")
+                else:
+                    print(f".  {k}: {v:.4f}")
+            return best["best_model"]
+        
+        loss.backward(retain_graph=True)
+        optimizer.step()
+        scheduler.step()
+
+    print("[training] exceed max ieteraions")
+    return best["best_model"]
 
 
 def visual_barrier(const, net):
@@ -224,11 +366,11 @@ def visual_barrier(const, net):
     )
     cbar = fig.colorbar(cf, ax=ax, label=r'$V(x)$')
     # 2) explicit contour lines at 0.9, 1.0, and 40.0
-    levels = [0.1, 0.9, 1.0, 2.0, 10.0]
+    levels = [0.1, 0.8, 0.9, 1.0, 2.0, 10.0]
     cs = ax.contour(
         X, Y, V,
         levels=levels,
-        colors=['white','green','blue', 'yellow','red'],  # pick distinct colors
+        colors=['white','yellow','green','blue', 'cyan','red'],  # pick distinct colors
         linewidths=1.5,
     )
     ax.clabel(cs, fmt='%1.1f', fontsize=10)
@@ -239,7 +381,7 @@ def visual_barrier(const, net):
     visual_specification(ax, const.X_GOAL_RANGE,   color='green')
 
     # 4) overlay sample trajs
-    x1_traj, x2_traj = test_dynamics()
+    x1_traj, x2_traj = propagate_traj()
     for i in range(x1_traj.shape[0]):
         plt.plot(x1_traj[i,:], x2_traj[i,:], color="white", linewidth=0.5)
 
@@ -247,8 +389,8 @@ def visual_barrier(const, net):
     ax.set_ylabel(r'$x_2$')
     ax.set_aspect('equal', 'box')
     plt.tight_layout(pad=0.3)
-    fig.savefig("figs/Vfunc_v1.pdf", format='pdf')
-    # plt.show()
+    # fig.savefig("figs/Vfunc_v1.pdf", format='pdf')
+    plt.show()
 
 
 def visual_barrier_3d(const, net):
@@ -274,7 +416,8 @@ def visual_barrier_3d(const, net):
     plt.xlabel(r'$x_1$')
     plt.ylabel(r'$x_2$')
     plt.tight_layout(pad=0.3)
-    fig.savefig("figs/Vfunc_3d_v1.pdf", format='pdf')
+    # fig.savefig("figs/Vfunc_3d_v1.pdf", format='pdf')
+    plt.show()
 
 
 def visual_specification(ax, bound, color, z_value=0.0):
@@ -313,7 +456,7 @@ def check_barrier(const, net):
     print("[check non-negative] V >= 0 for all x samples. ### Vmin={:.4f}".format(V.min()))
 
     # --- alpha ---
-    inside_init = filter_sample_insidebound(x_full, const.X_INIT_RANGE)
+    inside_init = const.filter_sample_insidebound(x_full, const.X_INIT_RANGE)
     if inside_init.any():
         x_init = x_full[inside_init]
     V_init = net(x_init).detach().numpy()
@@ -321,25 +464,25 @@ def check_barrier(const, net):
     print("[find] Vmin for all x samples in INIT. ### Vmin = {:.4f}".format(alpha_RA_stat))
 
     # --- check feasibility ---
-    inside_unsafe = filter_sample_insidebound(x_full, const.X_UNSAFE_RANGE)
+    inside_unsafe = const.filter_sample_insidebound(x_full, const.X_UNSAFE_RANGE)
     if inside_unsafe.any():
         x_unsafe = x_full[inside_unsafe]
     V_unsafe = net(x_unsafe).detach().numpy()
     print("[check beta_RA] beta_RA {:.4f} <= V for all x samples in UNSAFE. ### min V: {:.4f}".format(const.BETA_RA, V_unsafe.min()))
 
     # --- check goal
-    inside_goal = filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
+    inside_goal = const.filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
     if inside_goal.any():
         x_inside_goal = x_full[inside_goal]
     V_goal_in = net(x_inside_goal).detach().numpy()
     print("[check goal] (1) exists V(x) <= 0.9, for all x samples in GOAL. ### Vmin={:.4f}".format(V_goal_in.min()))
     # x = const.sample_x(const.X_RANGE, batch_size)
-    # inside_goal = filter_sample_insidebound(x, const.X_GOAL_RANGE)
+    # inside_goal = const.filter_sample_insidebound(x, const.X_GOAL_RANGE)
     outside_goal = ~inside_goal
     if outside_goal.any():
         x_outside_goal = x_full[outside_goal]
     V_goal_out = net(x_outside_goal).detach().numpy()
-    print("[check goal] (2) V(x) >= 0.9 for all x samples in GOAL. ### Vmin={:.4f}".format(V_goal_out.max()))
+    print("[check goal] (2) V(x) >= 0.9 for all x samples outside GOAL. ### Vmin={:.4f}".format(V_goal_out.min()))
 
     if inside_goal.any():
         x_G= x_full[~inside_goal]
@@ -357,16 +500,22 @@ def check_barrier(const, net):
 
 
 def main():
+    # --- Configuration ---
     train_flag = False
-    net_path = "output/net_v1.pth"
 
-    net = BaseNet(const, neurons=128)
+    # net_path = "output/net_v1.pth"
+    # net = BaseNet(const, neurons=128)
+
+    net_path = "output/net_ibp.pth"
+    net = IBPNet(const, neurons=256)
+
+    # --- Trainging ---
     if(train_flag):
         torch.manual_seed(0)
         np.random.seed(0)
         net.apply(init_weights_xavier)
         # visual_barrier(const, net)
-        net = train_barrier(const, net, iterations=50000)
+        net = train_barrier_ibp(const, net, iterations=50000)
         if(net_path is not None):
             torch.save({
                         'model_state_dict': net.state_dict(),
@@ -377,9 +526,11 @@ def main():
     else:
         net = load_trained_model(net, net_path)
 
-    check_barrier(const, net)
-    visual_barrier(const, net)
-    visual_barrier_3d(const, net)
+    # --- Post-process ---
+    # check_barrier(const, net)
+    # visual_barrier(const, net)
+    # visual_barrier_3d(const, net)
+    verify_ibp_differential(const, net)
 
 
 if __name__ == "__main__":
