@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from shapely.geometry import Polygon
 
 
 class Const_GBM():
@@ -10,7 +11,7 @@ class Const_GBM():
     _zeta = np.float32(0.1)
     _alpha_ra = np.float32(1.0)
     _beta_s = np.float32(0.9)
-    _kappa = np.float32(4.0)
+    _kappa = np.float32(4.0) #4.0
     _beta_ra = _kappa/(1.0-_eps)
     _x_range = np.array([[-100.0, 100.0], 
                          [-100.0, 100.0]],
@@ -97,4 +98,82 @@ class Const_GBM():
         grid_points = np.vstack([X.ravel(), Y.ravel()]).T
         grid_points_tensor = torch.tensor(grid_points, dtype=torch.float32, requires_grad=False)
         return X, Y, grid_points_tensor
+    
+
+    def filter_sample_insidebound(self, x, bound):
+        bound   = torch.as_tensor(bound, dtype=x.dtype)
+        lows, highs = bound[:,0], bound[:,1]                        # each (2,)
+        inside = (x >= lows) & (x <= highs)                  # shape (M,2) bool
+        inside = inside.all(dim=1)                       # shape (M,)  bool
+        return inside
+    
+
+    def get_f1_bound(self, bound):
+        x1_bound = bound[0,:]
+        x2_bound = bound[1,:]
+        A00_bound = np.array([self.A_MATRIX[0,0], self.A_MATRIX[0,0]])
+        A01_bound = np.array([self.A_MATRIX[0,1], self.A_MATRIX[0,1]])
+        bounds = self.get_bounds_from_product_of_two_bounds(
+            A00_bound, x1_bound
+        ) + self.get_bounds_from_product_of_two_bounds(
+            A01_bound, x2_bound
+        )
+        return bounds
+    
+
+    def get_f2_bound(self, bound):
+        x1_bound = bound[0,:]
+        x2_bound = bound[1,:]
+        A10_bound = np.array([self.A_MATRIX[1,0], self.A_MATRIX[1,0]])
+        A11_bound = np.array([self.A_MATRIX[1,1], self.A_MATRIX[1,1]])
+        bounds = self.get_bounds_from_product_of_two_bounds(
+            A10_bound, x1_bound
+        ) + self.get_bounds_from_product_of_two_bounds(
+            A11_bound, x2_bound
+        )
+        return bounds
+    
+
+    def get_g11square_bound(self, bound):
+        # g11 = sigma*x1, sigma is a constant
+        x1_bound = bound[0,:]
+        x_lo = x1_bound[0]
+        x_hi = x1_bound[1]
+        if x_lo >= 0:                       # case 1
+            f_lo, f_hi = x_lo**2, x_hi**2
+        elif x_hi <= 0:                     # case 2
+            f_lo, f_hi = x_hi**2, x_lo**2
+        elif np.abs(x_hi) < np.abs(x_lo):
+            f_hi = x_lo**2     
+            f_lo = 0.0
+        else:
+            f_hi = x_hi**2     
+            f_lo = 0.0
+        return np.array([f_lo, f_hi])*self.SIGMA**2
+    
+
+    def get_g22square_bound(self, bound):
+        # g22 = sigma*x2, sigma is a constant
+        x2_bound = bound[1,:]
+        x_lo = x2_bound[0]
+        x_hi = x2_bound[1]
+        if x_lo >= 0:                       # case 1
+            f_lo, f_hi = x_lo**2, x_hi**2
+        elif x_hi <= 0:                     # case 2
+            f_lo, f_hi = x_hi**2, x_lo**2
+        elif np.abs(x_hi) < np.abs(x_lo):
+            f_hi = x_lo**2     
+            f_lo = 0.0
+        else:
+            f_hi = x_hi**2     
+            f_lo = 0.0
+        return np.array([f_lo, f_hi])*self.SIGMA**2
+        
+    
+
+    def get_bounds_from_product_of_two_bounds(self, b1, b2):
+        points = np.array([b1[0]*b2[0], b1[0]*b2[1], b1[1]*b2[0], b1[1]*b2[1]])
+        lb = points.min()
+        ub = points.max()
+        return np.array([lb, ub])
     
