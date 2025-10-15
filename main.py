@@ -1,13 +1,18 @@
 import torch
 import numpy as np
 from src.constants import Const_GBM
+from src.torch_dyn_wrappers import attach_torch_dynamics
 from src.models import BaseNet, IBPNet, load_trained_model
 from src.dynamics import propagate_traj
 from src.verify_ibp import verify_ibp_differential
+from src.verify_crown import verify_crown_differential
+from src.verify_crown_direct import verify_crown_differential_direct
 import matplotlib.pyplot as plt
 from scipy.special import betaincinv
 
 const = Const_GBM()
+
+attach_torch_dynamics(const)
 
 
 def diff_operator(const, net, x):
@@ -461,28 +466,29 @@ def check_barrier(const, net):
         x_init = x_full[inside_init]
     V_init = net(x_init).detach().numpy()
     alpha_RA_stat = V_init.max()
-    print("[find] Vmin for all x samples in INIT. ### Vmin = {:.4f}".format(alpha_RA_stat))
+    print("[check init] V(x) for all x samples in INIT <= {:.4f}. ### max V = {:.4f}".format(const.ALPHA_RA, alpha_RA_stat))
 
     # --- check feasibility ---
     inside_unsafe = const.filter_sample_insidebound(x_full, const.X_UNSAFE_RANGE)
     if inside_unsafe.any():
         x_unsafe = x_full[inside_unsafe]
     V_unsafe = net(x_unsafe).detach().numpy()
-    print("[check beta_RA] beta_RA {:.4f} <= V for all x samples in UNSAFE. ### min V: {:.4f}".format(const.BETA_RA, V_unsafe.min()))
+    beta_RA_stat = V_unsafe.min()
+    print("[check beta_RA] V(x) for all x samples in UNSAFE >= beta_RA {:.4f}. ### min V: {:.4f}".format(const.BETA_RA, V_unsafe.min()))
 
     # --- check goal
     inside_goal = const.filter_sample_insidebound(x_full, const.X_GOAL_RANGE)
     if inside_goal.any():
         x_inside_goal = x_full[inside_goal]
     V_goal_in = net(x_inside_goal).detach().numpy()
-    print("[check goal] (1) exists V(x) <= 0.9, for all x samples in GOAL. ### Vmin={:.4f}".format(V_goal_in.min()))
+    print("[check goal] (1) exists V(x) <= {:.4f}, x in GOAL. ### Vmin={:.4f}".format(const.BETA_S, V_goal_in.min()))
     # x = const.sample_x(const.X_RANGE, batch_size)
     # inside_goal = const.filter_sample_insidebound(x, const.X_GOAL_RANGE)
     outside_goal = ~inside_goal
     if outside_goal.any():
         x_outside_goal = x_full[outside_goal]
     V_goal_out = net(x_outside_goal).detach().numpy()
-    print("[check goal] (2) V(x) >= 0.9 for all x samples outside GOAL. ### Vmin={:.4f}".format(V_goal_out.min()))
+    print("[check goal] (2) V(x) >= {:.4f} for all x samples outside GOAL. ### Vmin={:.4f}".format(const.BETA_S, V_goal_out.min()))
 
     if inside_goal.any():
         x_G= x_full[~inside_goal]
@@ -493,7 +499,7 @@ def check_barrier(const, net):
     GV = diff_operator(const, net, x_G).detach().numpy()
     print("[check differentail] V(x) < 0 for all x in the sub-beta_RA set and outside the target. ### GVmax={:.4f}".format(GV.max()))
 
-    Prob_RA = 1 - alpha_RA_stat/const.BETA_RA
+    Prob_RA = 1 - alpha_RA_stat/beta_RA_stat
     print("After verification, we have: with confidence {:.5f}, the probability of [reach avoid >= {:.6f}] is greater than {:.5f}".format(
         1 - delta, Prob_RA, 1 - eps
     ))
@@ -527,10 +533,15 @@ def main():
         net = load_trained_model(net, net_path)
 
     # --- Post-process ---
-    # check_barrier(const, net)
+    check_barrier(const, net)
     # visual_barrier(const, net)
     # visual_barrier_3d(const, net)
-    verify_ibp_differential(const, net)
+
+    # --- Verification ---
+    max_depth = 20
+    # verify_ibp_differential(const, net, gif_path="figs/verification_ibp.gif", max_depth=max_depth)
+    verify_crown_differential(const, net, gif_path="figs/verification_crown.gif", max_depth=max_depth)
+    # verify_crown_differential_direct(const, net, gif_path="figs/verification_crown_direct.gif", max_depth=max_depth)
 
 
 if __name__ == "__main__":
