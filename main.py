@@ -684,7 +684,7 @@ def main():
 
     # --- Post-process ---
     # check_barrier(const, net)
-    # visual_barrier(const, net)
+    visual_barrier(const, net)
     # visual_barrier_3d(const, net)
 
     # --- Verification ---
